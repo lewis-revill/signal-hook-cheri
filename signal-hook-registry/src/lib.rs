@@ -158,10 +158,15 @@ impl Slot {
     fn new(signal: libc::c_int) -> Result<Self, Error> {
         // C data structure, expected to be zeroed out.
         let mut new: libc::sigaction = unsafe { mem::zeroed() };
-        #[cfg(not(target_os = "aix"))]
-        { new.sa_sigaction = handler as usize; }
-        #[cfg(target_os = "aix")]
-        { new.sa_union.__su_sigaction = handler; }
+cfg_if::cfg_if! {
+        if #[cfg(all(target_arch = "morello+c64", target_env = "musl"))] {
+          new.sa_u.sa_sigaction = handler;
+        } else if #[cfg(target_os = "aix")] {
+          new.sa_union.__su_sigaction = handler;
+        } else {
+          new.sa_sigaction = handler as usize;
+        }
+}
         // Android is broken and uses different int types than the rest (and different depending on
         // the pointer width). This converts the flags to the proper type no matter what it is on
         // the given platform.
@@ -235,30 +240,49 @@ impl Prev {
 
     #[cfg(not(windows))]
     unsafe fn execute(&self, sig: c_int, info: *mut siginfo_t, data: *mut c_void) {
-        #[cfg(not(target_os = "aix"))]
-        let fptr = self.info.sa_sigaction;
-        #[cfg(target_os = "aix")]
-        let fptr = self.info.sa_union.__su_sigaction as usize;
-        if fptr != 0 && fptr != libc::SIG_DFL && fptr != libc::SIG_IGN {
-            // Android is broken and uses different int types than the rest (and different
-            // depending on the pointer width). This converts the flags to the proper type no
-            // matter what it is on the given platform.
-            //
-            // The trick is to create the same-typed variable as the sa_flags first and then
-            // set it to the proper value (does Rust have a way to copy a type in a different
-            // way?)
-            #[allow(unused_assignments)]
-            let mut siginfo = self.info.sa_flags;
-            siginfo = libc::SA_SIGINFO as _;
-            if self.info.sa_flags & siginfo == 0 {
-                let action = mem::transmute::<usize, extern "C" fn(c_int)>(fptr);
-                action(sig);
-            } else {
-                type SigAction = extern "C" fn(c_int, *mut siginfo_t, *mut c_void);
-                let action = mem::transmute::<usize, SigAction>(fptr);
-                action(sig, info, data);
+cfg_if::cfg_if! {
+        if #[cfg(all(target_arch = "morello+c64", target_env = "musl"))] {
+            let id = self.info.sa_u.sa_handler.sah_id;
+
+            if id != 0 && id != libc::SIG_DFL && id != libc::SIG_IGN {
+                #[allow(unused_assignments)]
+                let mut siginfo = self.info.sa_flags;
+                siginfo = libc::SA_SIGINFO as _;
+                if self.info.sa_flags & siginfo == 0 {
+                    let action = self.info.sa_u.sa_handler.sah_fn;
+                    action(sig);
+                } else {
+                    let action = self.info.sa_u.sa_sigaction;
+                    action(sig, info, data);
+                }
+            }
+        } else {
+            #[cfg(not(target_os = "aix"))]
+            let fptr = self.info.sa_sigaction;
+            #[cfg(target_os = "aix")]
+            let fptr = self.info.sa_union.__su_sigaction as usize;
+            if fptr != 0 && fptr != libc::SIG_DFL && fptr != libc::SIG_IGN {
+                // Android is broken and uses different int types than the rest (and different
+                // depending on the pointer width). This converts the flags to the proper type no
+                // matter what it is on the given platform.
+                //
+                // The trick is to create the same-typed variable as the sa_flags first and then
+                // set it to the proper value (does Rust have a way to copy a type in a different
+                // way?)
+                #[allow(unused_assignments)]
+                let mut siginfo = self.info.sa_flags;
+                siginfo = libc::SA_SIGINFO as _;
+                if self.info.sa_flags & siginfo == 0 {
+                    let action = mem::transmute::<usize, extern "C" fn(c_int)>(fptr);
+                    action(sig);
+                } else {
+                    type SigAction = extern "C" fn(c_int, *mut siginfo_t, *mut c_void);
+                    let action = mem::transmute::<usize, SigAction>(fptr);
+                    action(sig, info, data);
+                }
             }
         }
+}
     }
 }
 
